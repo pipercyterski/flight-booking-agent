@@ -137,5 +137,4 @@ Language(s)   : {languages}
 Currency      : {currencies}
 Timezone(s)   : {timezones}
 Calling Code  : {d.get('calling_code')}
-Driving Side  : {d.get('driving_side').capitalize()}
-Visa (Indian) : {d.get('visa_required')}"""
+Driving Side  : {d.get('driving_side').capitalize()}"""
