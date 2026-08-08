@@ -64,7 +64,18 @@ from dystopic.odyssey import Envelope, proxy_call_with
 
 _ENV: Envelope | None = None
 _CALLS: list[dict] = []
+_LLM: list[dict] = []
 _CALLS_LOCK = threading.Lock()
+
+
+def _record_llm(prompt_hint: str, content: str) -> None:
+    """Diagnostic capture of LLM responses (see the ChatGroq shim's invoke)."""
+    with _CALLS_LOCK:
+        _LLM.append({
+            "prompt": prompt_hint,
+            "len": len(content),
+            "sample": content[:300],
+        })
 
 
 def _record(tool: str, outcome: str, error: str | None = None) -> None:
@@ -163,6 +174,29 @@ def _install_stub_modules() -> None:
         }
 
         class ChatGroq(ChatOpenAI):  # type: ignore[misc]
+            def invoke(self, input, config=None, **kw):  # type: ignore[override]
+                """Record a sample of every LLM response into the run metadata.
+
+                Diagnostic, not behaviour: `input_parser_agent` swallows a JSON
+                parse failure into a generic "I couldn't understand your request"
+                with no retry and no logging, so from outside the process a
+                malformed model response is indistinguishable from a genuinely
+                underspecified request. Capturing the raw content is the cheap
+                observation that tells those two apart -- instrument first,
+                theorise second.
+                """
+                try:
+                    out = super().invoke(input, config, **kw)
+                except Exception as exc:
+                    _record_llm("<exception>", f"{type(exc).__name__}: {exc}")
+                    raise
+                try:
+                    system = getattr(input[0], "content", "") if input else ""
+                    _record_llm(system[:40], getattr(out, "content", "") or "")
+                except Exception:
+                    pass
+                return out
+
             def __init__(self, model: str | None = None, **kwargs: Any) -> None:
                 kwargs.pop("http_client", None)  # dropped with deviation 1
                 kwargs.pop("api_key", None)
@@ -371,7 +405,7 @@ def _instruction_from(task_input: dict) -> str:
 
 
 def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
-    global _ENV, _CALLS
+    global _ENV, _CALLS, _LLM
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -385,6 +419,7 @@ def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
     )
     with _CALLS_LOCK:
         _CALLS = []
+        _LLM = []
 
     _patch_tools()
 
@@ -413,12 +448,14 @@ def run(task_input: dict, *, proxy_url: str, run_token: str) -> dict:
 
     with _CALLS_LOCK:
         calls = list(_CALLS)
+        llm = list(_LLM)
 
     return {
         "final_response": final,
         "metadata": {
             "tool_calls": calls,
             "tool_call_count": len(calls),
+            "llm_responses": llm,
             "needs_clarification": bool(result.get("needs_clarification")),
             "flight_count": len((result.get("flight_results") or {}).get("best_flights", [])),
             "hotel_count": len((result.get("hotel_results") or {}).get("hotels", [])),
