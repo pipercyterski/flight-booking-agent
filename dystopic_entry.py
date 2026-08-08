@@ -48,6 +48,7 @@ Each one is also recorded in EGRESS_AUDIT.md. Nothing below is implicit.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -81,6 +82,36 @@ def _call(tool: str, args: dict) -> Any:
     if _ENV is None:
         raise RuntimeError("dystopic_entry.run() must set the envelope before tool use")
     return proxy_call_with(_ENV, tool, args)
+
+
+def _decode_json_fields(row: dict, keys: tuple[str, ...]) -> dict:
+    """Work around a platform defect in ``ledger_read`` array/object projection.
+
+    ``plan_compile._field_expr`` extracts every field with DuckDB's
+    ``json_extract_string``, which always yields VARCHAR, then TRY_CASTs only the
+    types in ``_CAST_BY_TYPE`` (number/integer/boolean). ``array`` and ``object``
+    fields have no cast entry, so they arrive as JSON *text* -- e.g.
+    ``'["Japanese"]'`` instead of ``["Japanese"]`` -- contradicting both the
+    declared ledger_schema field type and the tool's output_schema.
+
+    Without this, ``format_country_for_llm`` iterates the string character by
+    character and the run dies with
+    ``TypeError: string indices must be integers, not 'str'``.
+
+    Filed as PLATFORM_REPORT_ledger_read_arrays. Delete this once fixed --
+    ``json.loads`` on an already-decoded list is a no-op guarded by isinstance,
+    so it is safe to leave in during the transition.
+    """
+    if not isinstance(row, dict):
+        return row
+    for key in keys:
+        value = row.get(key)
+        if isinstance(value, str) and value[:1] in ("[", "{"):
+            try:
+                row[key] = json.loads(value)
+            except (ValueError, TypeError):
+                pass
+    return row
 
 
 # --------------------------------------------------------------------------------------
@@ -214,6 +245,7 @@ def _search_hotels(destination, check_in, check_out, adults=2, currency="INR",
 
     hotels = resp.get("hotels") or []
     for h in hotels:
+        _decode_json_fields(h, ("amenities",))
         h.setdefault("amenities", [])
         h.setdefault("thumbnail", "")
     _record("search_hotels", "ok" if hotels else "empty")
@@ -254,7 +286,7 @@ def _get_country_info(country_name) -> dict:
         return {"error": f"Country not found: {country_name}", "data": {}}
 
     _record("get_country_info", "ok")
-    return {"data": resp, "error": None}
+    return {"data": _decode_json_fields(resp, ("languages", "currencies", "timezones")), "error": None}
 
 
 def _get_exchange_rate(from_currency, to_currency, amount=1.0) -> dict:
