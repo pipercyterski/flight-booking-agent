@@ -25,7 +25,7 @@ Structure your response EXACTLY like this:
 - Pick the best flight from the options and explain why
 
 ## 🏨 Recommended Hotel
-- Pick the best hotel based on rating and budget and explain why
+- Pick the highest-rated hotel and explain why
 
 ## 📅 Day-by-Day Itinerary
 ### Day 1 - [Date] - [Weather emoji + condition]
